@@ -3,7 +3,6 @@ import jax.numpy as jnp
 import pytest
 
 import equinox as eqx
-import equinox.internal as eqxi
 
 
 def test_backward_nan(capfd):
@@ -24,7 +23,7 @@ def test_backward_nan(capfd):
     @eqx.filter_jit
     @jax.grad
     def f(x, terminate):
-        y = eqxi.debug_backward_nan(x, name="foo", terminate=terminate)
+        y = eqx.debug.backward_nan(x, name="foo", terminate=terminate)
         return backward_nan(y)
 
     capfd.readouterr()
@@ -38,3 +37,16 @@ def test_backward_nan(capfd):
 
     with pytest.raises(Exception):
         f(jnp.array(1.0), terminate=True)
+
+
+def test_check_dce(capfd):
+    @jax.jit
+    def f(x):
+        a, _ = eqx.debug.store_dce((x**2, x + 1))
+        return a
+
+    f(1)
+    capfd.readouterr()
+    eqx.debug.inspect_dce()
+    text, _ = capfd.readouterr()
+    assert "(i32[], <DCE'd>)" in text

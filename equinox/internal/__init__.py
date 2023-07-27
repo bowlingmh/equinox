@@ -1,3 +1,4 @@
+# Backward compatibility: expose via `equinox.internal`. Now available under `equinox`.
 from .._better_abstract import (
     AbstractClassVar as AbstractClassVar,
     AbstractVar as AbstractVar,
@@ -7,10 +8,14 @@ from .._compile_utils import (
     hashable_partition as hashable_partition,
 )
 from .._doc_utils import doc_remove_args as doc_remove_args, doc_repr as doc_repr
+
+# Backward compatibility: expose via `equinox.internal`. Now available under `equinox`.
 from .._enum import Enumeration as Enumeration
+
+# Backward compatibility: expose via `equinox.internal`. Now available under `equinox`.
 from .._errors import (
+    assert_dce as assert_dce,
     branched_error_if as branched_error_if,
-    branched_error_p as branched_error_p,
     error_if as error_if,
 )
 from .._misc import left_broadcast_to as left_broadcast_to
@@ -25,11 +30,17 @@ from .._unvmap import (
     unvmap_max_p as unvmap_max_p,
 )
 from .._vmap_pmap import if_mapped as if_mapped
-from ._debug import (
-    announce_jaxpr_p as announce_jaxpr_p,
+
+# Backward compatibility: expose via `equinox.internal`. Now available under
+# `equinox.debug`.
+from ..debug import (
     announce_transform as announce_transform,
-    debug_backward_nan as debug_backward_nan,
+    backward_nan as debug_backward_nan,  # noqa: F401
+    breakpoint_if as breakpoint_if,
+    inspect_dce as inspect_dce,
+    store_dce as store_dce,
 )
+from ..debug._announce_transform import announce_jaxpr_p as announce_jaxpr_p
 from ._finalise_jaxpr import (
     finalise_eval_jaxpr as finalise_eval_jaxpr,
     finalise_fn as finalise_fn,

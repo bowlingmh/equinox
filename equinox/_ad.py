@@ -16,6 +16,7 @@ from typing import (
 from typing_extensions import ParamSpec
 
 import jax
+import jax._src.traceback_util as traceback_util
 import jax.core
 import jax.interpreters.ad as ad
 import jax.numpy as jnp
@@ -34,6 +35,9 @@ from ._filters import (
 from ._make_jaxpr import filter_make_jaxpr
 from ._module import field, Module, module_update_wrapper, Partial, Static
 from ._tree import tree_equal
+
+
+traceback_util.register_exclusion(__file__)
 
 
 _P = ParamSpec("_P")
@@ -264,14 +268,21 @@ def _is_none(x):
     return x is None
 
 
-def _is_jvp_tracer(x):
-    return isinstance(x, ad.JVPTracer)
+def _is_jvp_tracer(main):
+    def _is_jvp_tracer_impl(x):
+        return isinstance(x, ad.JVPTracer) and x._trace.main is main
+
+    return _is_jvp_tracer_impl
 
 
 def filter_jvp(
-    fn: Callable[..., _T], primals: Sequence, tangents: Sequence
+    fn: Callable[..., _T], primals: Sequence, tangents: Sequence, **kwargs
 ) -> tuple[_T, PyTree]:
     """Like `jax.jvp`, but accepts arbitrary PyTrees. (Not just JAXable types.)
+
+    In the following, an "inexact arraylike" refers to either a floating-point JAX
+    array, or a complex JAX array, or a Python `float`, or a Python `complex`. These are
+    the types which JAX considers to be differentiable.
 
     **Arguments:**
 
@@ -279,12 +290,14 @@ def filter_jvp(
         its return type can be any Python object.
     - `primals`: The primal values at which `fn` should be evaluated. Should be a
         sequence of arguments, and its length should be equal to the number of
-        positional parameter of `fn`.
+        positional parameters of `fn`.
     - `tangents`: The tangent vector for which the Jacobian-vector product should be
         calculated. Should be a PyTree with the same structure as `primals`. The leaves
-        of `tangents` must be either floating-point JAX arrays, or Python floats, or
-        `None`s. The tangent must be `None` for any primal which is not itself a
-        floating-point JAX array or Python float.
+        of `tangents` must either be inexact arraylikes, or they can be `None`s. `None`s
+        are used to indicate (symbolic) zero tangents; in particular these must be
+        passed for all primals that are not inexact arraylikes. (And `None` can also be
+        passed for any inexact arraylike primals too.)
+    - `**kwargs`: Any keyword arguments to pass to `fn`. These are not differentiated.
 
     **Returns:**
 
@@ -293,7 +306,9 @@ def filter_jvp(
     product of `fn` evaluated at `primals` with `tangents`.
 
     The `tangents_out` has the same structure as `primals_out`, but has `None` for
-    any leaves that aren't differentiable.
+    any leaves with symbolic zero derivative. (Either because they're not
+    differentiable -- i.e. they're not a floating-point JAX array or Python `float` --
+    or because they have no dependence on any input with non-symbolic-zero tangent.)
 
     !!! Tip
 
@@ -311,10 +326,11 @@ def filter_jvp(
     flat_tangents = jtu.tree_leaves(tangents)  # all non-None tangents are dynamic
 
     def _fn(*_flat_dynamic):
+        _main = jax.core.find_top_trace(_flat_dynamic).main
         _dynamic = jtu.tree_unflatten(treedef, _flat_dynamic)
         _in = combine(_dynamic, static_primals)
-        _out = fn(*_in)
-        _dynamic_out, _static_out = partition(_out, _is_jvp_tracer)
+        _out = fn(*_in, **kwargs)
+        _dynamic_out, _static_out = partition(_out, _is_jvp_tracer(_main))
         return _dynamic_out, Static(_static_out)
 
     primal_out, tangent_out = jax.jvp(_fn, flat_dynamic_primals, flat_tangents)
@@ -438,8 +454,8 @@ class _ClosureConvert(Module):
         )
         assert len(out_dynamic_flat) == len(out_dynamic_struct_flat)
         for o1, o2 in zip(out_dynamic_flat, out_dynamic_struct_flat):
-            assert o1.shape == o2.shape
-            assert o1.dtype == o2.dtype
+            assert jnp.shape(o1) == jnp.shape(o2)
+            assert jnp.result_type(o1) == jnp.result_type(o2)
         out = jtu.tree_unflatten(out_dynamic_treedef, out_dynamic_flat)
         out = combine(out, self_out_static)
         return out
@@ -586,7 +602,9 @@ class filter_custom_jvp:
                 raise ValueError("Received keyword tangent")
             t_args = jtu.tree_map(_drop_nondiff, t_args, d_args)
             args, kwargs = combine(dynamic, static)
-            return fn_jvp(args, t_args, **kwargs)
+            out, t_out = fn_jvp(args, t_args, **kwargs)
+            t_out = jtu.tree_map(_none_to_zero, t_out, out, is_leaf=_is_none)
+            return out, t_out
 
         self.fn.defjvp(fn_jvp_wrapper, symbolic_zeros=True)
 
@@ -653,7 +671,9 @@ def _none_to_zero(ct, x):
         if x is None:
             return None
         else:
-            aval = jax.core.get_aval(x).at_least_vspace()
+            # No raising-to-vspace. JAX is internally inconsistent, and expects integers
+            # to have integer tangents from custom_{jvp,vjp} rules
+            aval = jax.core.get_aval(x)  # .at_least_vspace()
             return jax.custom_derivatives.SymbolicZero(aval)
     else:
         return ct
@@ -747,14 +767,16 @@ class filter_custom_vjp:
 
         def _fn_fwd(perturbed, vjp_arg, *args, **kwargs):
             del perturbed
-            return fn_fwd(vjp_arg, *args, **kwargs)
+            out, residuals = fn_fwd(vjp_arg, *args, **kwargs)
+            return out, (out, residuals)
 
         def _fn_bwd(
             residuals, grad_diff_array_out, perturbed, vjp_arg, *args, **kwargs
         ):
             del perturbed
+            out, residuals = residuals
             grad_diff_array_out = jtu.tree_map(
-                _materialise_symbolic_zero, vjp_arg, grad_diff_array_out
+                _materialise_symbolic_zero, out, grad_diff_array_out
             )
             return fn_bwd(residuals, grad_diff_array_out, vjp_arg, *args, **kwargs)
 
